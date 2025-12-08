@@ -1,0 +1,25 @@
+# Claude Code
+CLAUDE.md
+
+# Rust build artifacts
+/target/
+debug/
+*.pdb
+
+# Cargo lock (optional for binaries, but we'll include it)
+# Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Backup files
+*.bak
+*.orig

@@ -1,0 +1,21 @@
+[package]
+name = "retroshield"
+version = "0.1.0"
+edition = "2021"
+description = "Z80 emulator for RetroShield firmware"
+license = "MIT"
+
+[dependencies]
+rz80 = "0.1"
+libc = "0.2"
+ratatui = "0.29"
+crossterm = "0.28"
+sysinfo = "0.32"
+
+[[bin]]
+name = "retroshield"
+path = "src/main.rs"
+
+[[bin]]
+name = "retroshield_tui"
+path = "src/tui.rs"

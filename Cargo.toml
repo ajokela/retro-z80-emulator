@@ -1,9 +1,15 @@
 [package]
-name = "retroshield"
+name = "retro-z80-emulator"
 version = "0.1.0"
 edition = "2021"
-description = "Z80 emulator for RetroShield firmware"
+description = "Z80 emulator for RetroShield firmware with TUI debugger"
 license = "MIT"
+authors = ["Alex Jokela"]
+repository = "https://github.com/ajokela/retro-z80-emulator"
+homepage = "https://github.com/ajokela/retro-z80-emulator"
+readme = "README.md"
+keywords = ["z80", "emulator", "retroshield", "tui", "debugger"]
+categories = ["emulators", "command-line-utilities"]
 
 [dependencies]
 rz80 = "0.1"

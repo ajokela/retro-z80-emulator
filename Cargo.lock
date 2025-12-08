@@ -395,7 +395,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "retroshield"
+name = "retro-z80-emulator"
 version = "0.1.0"
 dependencies = [
  "crossterm",

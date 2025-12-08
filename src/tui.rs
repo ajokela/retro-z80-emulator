@@ -268,13 +268,7 @@ impl Bus for RetroShield {
             }
             USART_DATA => {
                 *self.uses_8251.borrow_mut() = true; // Mark ROM as using 8251
-                let c = self.get_input().unwrap_or(0);
-                // Convert to uppercase like Arduino
-                if c >= b'a' && c <= b'z' {
-                    c - b'a' + b'A'
-                } else {
-                    c
-                }
+                self.get_input().unwrap_or(0)
             }
             _ => 0xFF,
         };

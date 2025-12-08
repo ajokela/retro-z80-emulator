@@ -107,6 +107,15 @@ The status bar shows:
 - **IM 1** - Manually simulated (RST 38H) for 8251-based ROMs
 - **IM 2** - Supported via rz80 crate
 
+## Caveats
+
+**High-speed output loops**: Programs with tight infinite loops that produce continuous output (e.g., `10 PRINT "HELLO": GOTO 10`) may appear unresponsive in the TUI. The emulated Z80 runs at 30+ MHz, producing thousands of output lines per second, which overwhelms the TUI's ~60 FPS refresh rate and terminal buffer. The emulator is still running correctly.
+
+Workarounds:
+- Press `-` repeatedly to reduce emulation speed (`cycles_per_frame`)
+- Add delays in your program (e.g., `FOR I=1 TO 1000: NEXT I`)
+- Use the passthrough emulator (`retroshield`) instead of the TUI for such programs
+
 ## Included ROMs
 
 The `roms/` directory contains pre-built ROM binaries for testing:

@@ -157,6 +157,7 @@ struct RetroShield {
     usart: Intel8251,
     terminal: RefCell<TerminalBuffer>,
     input_buffer: RefCell<VecDeque<u8>>,
+    output_buffer: RefCell<VecDeque<u8>>,  // Buffered output for throttled display
     uses_8251: RefCell<bool>,
     int_signaled: RefCell<bool>,
 }
@@ -169,9 +170,33 @@ impl RetroShield {
             usart: Intel8251::new(),
             terminal: RefCell::new(TerminalBuffer::new()),
             input_buffer: RefCell::new(VecDeque::new()),
+            output_buffer: RefCell::new(VecDeque::new()),
             uses_8251: RefCell::new(false),
             int_signaled: RefCell::new(false),
         }
+    }
+
+    /// Queue a character for output (called by cpu_outp)
+    fn queue_output(&self, c: u8) {
+        self.output_buffer.borrow_mut().push_back(c);
+    }
+
+    /// Consume up to `max_chars` from output buffer into terminal
+    fn flush_output(&self, max_chars: usize) -> usize {
+        let mut output = self.output_buffer.borrow_mut();
+        let mut terminal = self.terminal.borrow_mut();
+        let count = max_chars.min(output.len());
+        for _ in 0..count {
+            if let Some(c) = output.pop_front() {
+                terminal.putchar(c as char);
+            }
+        }
+        count
+    }
+
+    /// Get number of pending output characters
+    fn pending_output(&self) -> usize {
+        self.output_buffer.borrow().len()
     }
 
     fn configure_rom(&mut self, filename: &str) {
@@ -261,11 +286,11 @@ impl Bus for RetroShield {
         let val = val as u8;
         match port {
             ACIA_DATA => {
-                self.terminal.borrow_mut().putchar(val as char);
+                self.queue_output(val);
             }
             USART_DATA => {
                 *self.uses_8251.borrow_mut() = true;
-                self.terminal.borrow_mut().putchar(val as char);
+                self.queue_output(val);
             }
             USART_CTRL => {
                 *self.uses_8251.borrow_mut() = true;
@@ -447,6 +472,7 @@ struct App {
     paused: bool,
     total_cycles: u64,
     cycles_per_frame: u32,
+    chars_per_frame: usize,  // Output throttle: max chars to display per frame
     mem_view_addr: u16,
     last_update: Instant,
     cycles_since_update: u64,
@@ -493,6 +519,7 @@ impl App {
             paused: true,
             total_cycles: 0,
             cycles_per_frame: 50000,
+            chars_per_frame: 120,  // ~120 chars/frame * 60fps = ~7200 chars/sec (readable speed)
             mem_view_addr: 0x2000,
             last_update: Instant::now(),
             cycles_since_update: 0,
@@ -511,6 +538,11 @@ impl App {
             self.cursor_visible = !self.cursor_visible;
             self.last_blink = Instant::now();
         }
+    }
+
+    /// Flush buffered output to terminal at throttled rate
+    fn flush_output(&mut self) {
+        self.system.flush_output(self.chars_per_frame);
     }
 
     fn step(&mut self) {
@@ -881,6 +913,14 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
 
     let help = " F5:Run F6:Step F7:Pause F8:Reset F9/10:Mem Alt+/-:Speed F12:Quit";
 
+    // Show pending output buffer size if significant
+    let pending = app.system.pending_output();
+    let pending_text = if pending > 100 {
+        Span::styled(format!("Buf:{} ", pending), Style::default().fg(Color::Yellow))
+    } else {
+        Span::raw("")
+    };
+
     let line = Line::from(vec![
         status_text,
         Span::raw(" "),
@@ -896,6 +936,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
             format!("Mem:{:.1}MB ", app.host_memory_mb),
             Style::default().fg(Color::LightBlue),
         ),
+        pending_text,
         Span::styled(
             format!("Cyc:{}", app.total_cycles),
             Style::default().fg(Color::Gray),
@@ -1057,6 +1098,8 @@ fn main() -> io::Result<()> {
             if !app.paused && !app.cpu.halt {
                 app.run_frame();
             }
+            // Flush buffered output at throttled rate (always, even when paused)
+            app.flush_output();
             app.update_metrics();
             app.update_cursor_blink();
             last_tick = Instant::now();

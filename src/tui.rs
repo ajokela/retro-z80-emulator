@@ -879,7 +879,7 @@ fn render_status(f: &mut Frame, area: Rect, app: &App) {
         Span::styled("[RUNNING]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD))
     };
 
-    let help = " F5:Run F6:Step F7:Pause F8:Reset F9/10:Mem F12:Quit";
+    let help = " F5:Run F6:Step F7:Pause F8:Reset F9/10:Mem Alt+/-:Speed F12:Quit";
 
     let line = Line::from(vec![
         status_text,
@@ -1027,19 +1027,20 @@ fn main() -> io::Result<()> {
                     KeyCode::PageDown => {
                         app.mem_view_addr = app.mem_view_addr.saturating_add(256);
                     }
-                    KeyCode::Char('+') | KeyCode::Char('=') => {
-                        app.cycles_per_frame = (app.cycles_per_frame * 2).min(1_000_000);
-                    }
-                    KeyCode::Char('-') => {
-                        app.cycles_per_frame = (app.cycles_per_frame / 2).max(1000);
-                    }
                     KeyCode::Char(c) => {
                         if key.modifiers.contains(KeyModifiers::CONTROL) {
-                            // Ctrl+C sends 0x03
-                            if c == 'c' {
-                                app.system.send_key(0x03);
+                            // Ctrl+C sends 0x03, Ctrl+other sends control codes
+                            let code = (c as u8) & 0x1F;
+                            app.system.send_key(code);
+                        } else if key.modifiers.contains(KeyModifiers::ALT) {
+                            // Alt+= to increase speed, Alt+- to decrease
+                            if c == '=' || c == '+' {
+                                app.cycles_per_frame = (app.cycles_per_frame * 2).min(1_000_000);
+                            } else if c == '-' {
+                                app.cycles_per_frame = (app.cycles_per_frame / 2).max(1000);
                             }
                         } else {
+                            // Send character to emulated system
                             app.system.send_key(c as u8);
                         }
                     }

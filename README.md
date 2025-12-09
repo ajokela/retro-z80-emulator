@@ -1,6 +1,6 @@
 # RetroShield Z80 Emulator (Rust)
 
-A Z80 emulator written in Rust for testing [RetroShield Z80](https://8bitforce.com/about/) firmware. Includes both a simple passthrough emulator and a full-featured TUI debugger.
+A Z80 emulator written in Rust for testing [RetroShield Z80](https://8bitforce.com/about/) firmware. Includes a simple passthrough emulator, a full-featured TUI debugger, and a WebAssembly build for browser-based emulation.
 
 ## Features
 
@@ -8,17 +8,98 @@ A Z80 emulator written in Rust for testing [RetroShield Z80](https://8bitforce.c
 - **Dual serial chip emulation:**
   - MC6850 ACIA (ports $80/$81) - used by MINT, Firth, Monty, Retro Pascal
   - Intel 8251 USART (ports $00/$01) - used by Grant's BASIC, EFEX
-- **Two emulator modes:**
+- **Three emulator modes:**
   - `retroshield` - Simple passthrough (stdin/stdout)
   - `retroshield_tui` - Full TUI debugger with registers, disassembly, stack, memory view
+  - **WebAssembly** - Browser-based emulation with JavaScript API
 
 ## Building
+
+### Native (TUI and Passthrough)
 
 ```bash
 cargo build --release
 ```
 
 Binaries will be in `target/release/`.
+
+### WebAssembly
+
+To build for the browser, you'll need [wasm-pack](https://rustwasm.github.io/wasm-pack/):
+
+```bash
+# Install wasm-pack if you don't have it
+cargo install wasm-pack
+
+# Build the WASM package
+wasm-pack build --target web --out-dir pkg
+```
+
+This produces:
+- `pkg/retro_z80_emulator.js` - JavaScript bindings
+- `pkg/retro_z80_emulator_bg.wasm` - WebAssembly binary
+
+#### Using in a Web Page
+
+```html
+<script type="module">
+import init, { Z80Emulator } from './pkg/retro_z80_emulator.js';
+
+async function main() {
+    await init();
+    const emulator = new Z80Emulator();
+
+    // Load a ROM
+    const response = await fetch('rom.bin');
+    const data = new Uint8Array(await response.arrayBuffer());
+    emulator.load_rom(data);
+
+    // For 8251-based ROMs (like Grant's BASIC)
+    // emulator.set_8251_mode(true);
+
+    // Run emulation loop
+    function runLoop() {
+        emulator.run(50000);  // Run 50000 cycles
+
+        // Get any output from the serial port
+        const output = emulator.get_output_string();
+        if (output.length > 0) {
+            console.log(output);
+        }
+
+        requestAnimationFrame(runLoop);
+    }
+    runLoop();
+
+    // Send keyboard input
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') {
+            emulator.send_char(13);
+        } else if (e.key.length === 1) {
+            emulator.send_char(e.key.charCodeAt(0));
+        }
+    });
+}
+
+main();
+</script>
+```
+
+#### WASM API
+
+| Method | Description |
+|--------|-------------|
+| `new Z80Emulator()` | Create a new emulator instance |
+| `load_rom(data: Uint8Array)` | Load ROM data and reset CPU |
+| `reset()` | Reset the CPU |
+| `run(cycles: number)` | Execute given number of cycles |
+| `send_char(c: number)` | Send a character to serial input |
+| `send_string(s: string)` | Send a string to serial input |
+| `get_output_string()` | Get and clear serial output buffer |
+| `set_8251_mode(enabled: boolean)` | Switch between ACIA and 8251 mode |
+| `get_pc()` | Get program counter |
+| `get_cycles()` | Get total cycles executed |
+| `is_halted()` | Check if CPU is halted |
 
 ## Usage
 
@@ -139,11 +220,15 @@ The `roms/` directory contains pre-built ROM binaries for testing:
 
 ## Dependencies
 
+### Native
 - [rz80](https://crates.io/crates/rz80) - Z80 CPU emulation
 - [ratatui](https://crates.io/crates/ratatui) - Terminal UI framework
 - [crossterm](https://crates.io/crates/crossterm) - Terminal manipulation
 - [sysinfo](https://crates.io/crates/sysinfo) - System metrics
 - [libc](https://crates.io/crates/libc) - Non-blocking stdin (Unix)
+
+### WebAssembly
+- [wasm-bindgen](https://crates.io/crates/wasm-bindgen) - JavaScript interop
 
 ## License
 

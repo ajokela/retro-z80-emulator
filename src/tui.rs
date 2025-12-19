@@ -49,10 +49,24 @@ const TERM_ROWS: usize = 24;
 // Terminal Emulation
 //=============================================================================
 
+/// VT220 escape sequence parser state
+#[derive(Clone, Copy, PartialEq)]
+enum EscapeState {
+    Normal,
+    Escape,      // Got ESC
+    Bracket,     // Got ESC[
+    Private,     // Got ESC[? (private mode)
+}
+
 struct TerminalBuffer {
     buffer: Vec<char>,
     cursor_x: usize,
     cursor_y: usize,
+    cursor_visible: bool,
+    vt220_mode: bool,
+    escape_state: EscapeState,
+    escape_params: Vec<u16>,
+    current_param: Option<u16>,
 }
 
 impl TerminalBuffer {
@@ -61,13 +75,114 @@ impl TerminalBuffer {
             buffer: vec![' '; TERM_COLS * TERM_ROWS],
             cursor_x: 0,
             cursor_y: 0,
+            cursor_visible: true,
+            vt220_mode: false,
+            escape_state: EscapeState::Normal,
+            escape_params: Vec::new(),
+            current_param: None,
         }
+    }
+
+    fn set_vt220_mode(&mut self, enabled: bool) {
+        self.vt220_mode = enabled;
+    }
+
+    fn is_cursor_visible(&self) -> bool {
+        self.cursor_visible
     }
 
     fn clear(&mut self) {
         self.buffer.fill(' ');
         self.cursor_x = 0;
         self.cursor_y = 0;
+        self.escape_state = EscapeState::Normal;
+        self.escape_params.clear();
+        self.current_param = None;
+    }
+
+    /// Clear from cursor to end of line
+    fn clear_to_eol(&mut self) {
+        for x in self.cursor_x..TERM_COLS {
+            self.buffer[self.cursor_y * TERM_COLS + x] = ' ';
+        }
+    }
+
+    /// Execute a VT220 escape sequence
+    fn execute_escape_sequence(&mut self, final_char: char) {
+        // Finalize any pending parameter
+        if let Some(p) = self.current_param {
+            self.escape_params.push(p);
+        }
+
+        let params = &self.escape_params;
+
+        match (self.escape_state, final_char) {
+            // ESC[H or ESC[row;colH - Cursor position
+            (EscapeState::Bracket, 'H') | (EscapeState::Bracket, 'f') => {
+                let row = params.first().copied().unwrap_or(1).saturating_sub(1) as usize;
+                let col = params.get(1).copied().unwrap_or(1).saturating_sub(1) as usize;
+                self.cursor_y = row.min(TERM_ROWS - 1);
+                self.cursor_x = col.min(TERM_COLS - 1);
+            }
+            // ESC[2J - Clear screen
+            (EscapeState::Bracket, 'J') => {
+                let mode = params.first().copied().unwrap_or(0);
+                if mode == 2 {
+                    // Clear entire screen
+                    self.buffer.fill(' ');
+                } else if mode == 0 {
+                    // Clear from cursor to end of screen
+                    let start = self.cursor_y * TERM_COLS + self.cursor_x;
+                    for i in start..self.buffer.len() {
+                        self.buffer[i] = ' ';
+                    }
+                }
+            }
+            // ESC[K - Clear to end of line
+            (EscapeState::Bracket, 'K') => {
+                self.clear_to_eol();
+            }
+            // ESC[?25l - Hide cursor
+            (EscapeState::Private, 'l') => {
+                if params.first().copied() == Some(25) {
+                    self.cursor_visible = false;
+                }
+            }
+            // ESC[?25h - Show cursor
+            (EscapeState::Private, 'h') => {
+                if params.first().copied() == Some(25) {
+                    self.cursor_visible = true;
+                }
+            }
+            // ESC[nA - Cursor up
+            (EscapeState::Bracket, 'A') => {
+                let n = params.first().copied().unwrap_or(1) as usize;
+                self.cursor_y = self.cursor_y.saturating_sub(n);
+            }
+            // ESC[nB - Cursor down
+            (EscapeState::Bracket, 'B') => {
+                let n = params.first().copied().unwrap_or(1) as usize;
+                self.cursor_y = (self.cursor_y + n).min(TERM_ROWS - 1);
+            }
+            // ESC[nC - Cursor forward
+            (EscapeState::Bracket, 'C') => {
+                let n = params.first().copied().unwrap_or(1) as usize;
+                self.cursor_x = (self.cursor_x + n).min(TERM_COLS - 1);
+            }
+            // ESC[nD - Cursor back
+            (EscapeState::Bracket, 'D') => {
+                let n = params.first().copied().unwrap_or(1) as usize;
+                self.cursor_x = self.cursor_x.saturating_sub(n);
+            }
+            _ => {
+                // Unrecognized escape sequence - ignore
+            }
+        }
+
+        // Reset state
+        self.escape_state = EscapeState::Normal;
+        self.escape_params.clear();
+        self.current_param = None;
     }
 
     fn scroll(&mut self) {
@@ -84,6 +199,70 @@ impl TerminalBuffer {
     }
 
     fn putchar(&mut self, c: char) {
+        // VT220 escape sequence handling
+        if self.vt220_mode {
+            match self.escape_state {
+                EscapeState::Escape => {
+                    // Got ESC, waiting for next char
+                    if c == '[' {
+                        self.escape_state = EscapeState::Bracket;
+                        return;
+                    } else {
+                        // Not a CSI sequence, reset
+                        self.escape_state = EscapeState::Normal;
+                    }
+                }
+                EscapeState::Bracket => {
+                    // Inside ESC[ sequence
+                    if c == '?' {
+                        self.escape_state = EscapeState::Private;
+                        return;
+                    } else if c.is_ascii_digit() {
+                        // Accumulate parameter digit
+                        let digit = c.to_digit(10).unwrap() as u16;
+                        self.current_param = Some(self.current_param.unwrap_or(0) * 10 + digit);
+                        return;
+                    } else if c == ';' {
+                        // Parameter separator
+                        self.escape_params.push(self.current_param.unwrap_or(0));
+                        self.current_param = None;
+                        return;
+                    } else if c.is_ascii_alphabetic() {
+                        // Final character - execute sequence
+                        self.execute_escape_sequence(c);
+                        return;
+                    } else {
+                        // Invalid - reset
+                        self.escape_state = EscapeState::Normal;
+                        self.escape_params.clear();
+                        self.current_param = None;
+                    }
+                }
+                EscapeState::Private => {
+                    // Inside ESC[? sequence
+                    if c.is_ascii_digit() {
+                        let digit = c.to_digit(10).unwrap() as u16;
+                        self.current_param = Some(self.current_param.unwrap_or(0) * 10 + digit);
+                        return;
+                    } else if c == ';' {
+                        self.escape_params.push(self.current_param.unwrap_or(0));
+                        self.current_param = None;
+                        return;
+                    } else if c == 'l' || c == 'h' {
+                        // Private mode set/reset
+                        self.execute_escape_sequence(c);
+                        return;
+                    } else {
+                        // Invalid - reset
+                        self.escape_state = EscapeState::Normal;
+                        self.escape_params.clear();
+                        self.current_param = None;
+                    }
+                }
+                EscapeState::Normal => {}
+            }
+        }
+
         match c {
             '\r' => {
                 self.cursor_x = 0;
@@ -106,7 +285,13 @@ impl TerminalBuffer {
                 self.clear();
             }
             '\x1B' => {
-                // Escape - ignore for now
+                // Escape
+                if self.vt220_mode {
+                    self.escape_state = EscapeState::Escape;
+                    self.escape_params.clear();
+                    self.current_param = None;
+                }
+                // If not VT220 mode, just ignore
             }
             _ if c >= ' ' => {
                 if self.cursor_x < TERM_COLS && self.cursor_y < TERM_ROWS {
@@ -243,6 +428,14 @@ impl RetroShield {
 
     fn get_cursor(&self) -> (usize, usize) {
         self.terminal.borrow().get_cursor()
+    }
+
+    fn set_vt220_mode(&self, enabled: bool) {
+        self.terminal.borrow_mut().set_vt220_mode(enabled);
+    }
+
+    fn is_cursor_visible(&self) -> bool {
+        self.terminal.borrow().is_cursor_visible()
     }
 }
 
@@ -479,12 +672,15 @@ struct App {
     // Cursor blink
     cursor_visible: bool,
     last_blink: Instant,
+    // VT220 mode
+    vt220_mode: bool,
 }
 
 impl App {
-    fn new(rom_file: &str) -> io::Result<Self> {
+    fn new(rom_file: &str, vt220_mode: bool) -> io::Result<Self> {
         let mut system = RetroShield::new();
         system.configure_rom(rom_file);
+        system.set_vt220_mode(vt220_mode);
 
         let mut cpu = CPU::new_64k();
 
@@ -510,7 +706,7 @@ impl App {
         Ok(Self {
             cpu,
             system,
-            paused: true,
+            paused: false,
             total_cycles: 0,
             cycles_per_frame: 50000,
             chars_per_frame: 120,  // ~120 chars/frame * 60fps = ~7200 chars/sec (readable speed)
@@ -524,6 +720,7 @@ impl App {
             host_memory_mb: 0.0,
             cursor_visible: true,
             last_blink: Instant::now(),
+            vt220_mode,
         })
     }
 
@@ -986,7 +1183,14 @@ fn ui(f: &mut Frame, app: &App) {
     render_disassembly(f, upper_right_chunks[0], &app.cpu);
     render_stack(f, stack_state_chunks[0], &app.cpu);
     render_cpu_state(f, stack_state_chunks[1], &app.cpu);
-    render_terminal(f, right_chunks[1], &app.system, app.cursor_visible);
+    // In VT220 mode, use terminal's cursor visibility (controlled by escape sequences)
+    // Otherwise use app's blinking cursor
+    let cursor_visible = if app.vt220_mode {
+        app.system.is_cursor_visible() && app.cursor_visible
+    } else {
+        app.cursor_visible
+    };
+    render_terminal(f, right_chunks[1], &app.system, cursor_visible);
     render_status(f, main_chunks[1], app);
 }
 
@@ -995,7 +1199,10 @@ fn ui(f: &mut Frame, app: &App) {
 //=============================================================================
 
 fn print_usage(program: &str) {
-    eprintln!("Usage: {} <rom.bin>", program);
+    eprintln!("Usage: {} [OPTIONS] <rom.bin>", program);
+    eprintln!();
+    eprintln!("Options:");
+    eprintln!("  --vt220, -v   Enable VT220 escape sequence interpretation");
     eprintln!();
     eprintln!("TUI Debugger Controls:");
     eprintln!("  F5        Run continuously");
@@ -1017,10 +1224,33 @@ fn main() -> io::Result<()> {
         process::exit(1);
     }
 
-    let rom_file = &args[1];
+    // Parse arguments
+    let mut vt220_mode = false;
+    let mut rom_file: Option<&str> = None;
+
+    for arg in &args[1..] {
+        match arg.as_str() {
+            "--vt220" | "-v" => vt220_mode = true,
+            _ if !arg.starts_with('-') => rom_file = Some(arg),
+            _ => {
+                eprintln!("Unknown option: {}", arg);
+                print_usage(&args[0]);
+                process::exit(1);
+            }
+        }
+    }
+
+    let rom_file = match rom_file {
+        Some(f) => f,
+        None => {
+            eprintln!("Error: ROM file required");
+            print_usage(&args[0]);
+            process::exit(1);
+        }
+    };
 
     // Initialize app
-    let mut app = App::new(rom_file)?;
+    let mut app = App::new(rom_file, vt220_mode)?;
 
     // Setup terminal
     enable_raw_mode()?;
@@ -1082,6 +1312,27 @@ fn main() -> io::Result<()> {
                     KeyCode::Enter => app.system.send_key(b'\r'),
                     KeyCode::Backspace => app.system.send_key(0x08),
                     KeyCode::Esc => app.system.send_key(0x1B),
+                    // Arrow keys send VT100 escape sequences
+                    KeyCode::Up => {
+                        app.system.send_key(0x1B);
+                        app.system.send_key(b'[');
+                        app.system.send_key(b'A');
+                    }
+                    KeyCode::Down => {
+                        app.system.send_key(0x1B);
+                        app.system.send_key(b'[');
+                        app.system.send_key(b'B');
+                    }
+                    KeyCode::Right => {
+                        app.system.send_key(0x1B);
+                        app.system.send_key(b'[');
+                        app.system.send_key(b'C');
+                    }
+                    KeyCode::Left => {
+                        app.system.send_key(0x1B);
+                        app.system.send_key(b'[');
+                        app.system.send_key(b'D');
+                    }
                     _ => {}
                 }
             }

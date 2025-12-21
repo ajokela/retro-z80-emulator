@@ -1,18 +1,21 @@
 //! RetroShield Z80 Emulator
 //!
 //! A Z80 emulator for testing RetroShield firmware.
-//! Supports MC6850 ACIA and Intel 8251 USART serial chips.
+//! Supports MC6850 ACIA, Intel 8251 USART serial chips, and SD card emulation.
 
 use std::cell::RefCell;
 use std::env;
 use std::fs::File;
 use std::io::{self, Read, Write};
+use std::path::PathBuf;
 use std::process;
 
 use rz80::{Bus, CPU};
 
+mod sd;
 mod serial;
 
+use sd::SdCard;
 use serial::{Mc6850, Intel8251};
 
 /// MC6850 ACIA I/O ports
@@ -44,6 +47,7 @@ struct RetroShield {
     rom_size: u16,
     acia: Mc6850,
     usart: Intel8251,
+    sd: SdCard,
     uses_8251: bool,
     debug: bool,
     dump_state: RefCell<DumpState>,
@@ -51,11 +55,12 @@ struct RetroShield {
 }
 
 impl RetroShield {
-    fn new() -> Self {
+    fn new(storage_dir: PathBuf) -> Self {
         Self {
             rom_size: 0x2000, // Default 8KB ROM
             acia: Mc6850::new(),
             usart: Intel8251::new(),
+            sd: SdCard::new(storage_dir),
             uses_8251: false,
             debug: false,
             dump_state: RefCell::new(DumpState::default()),
@@ -141,6 +146,9 @@ impl Bus for RetroShield {
             USART_CTRL => self.usart.read_status(),
             USART_DATA => self.usart.read_data(),
 
+            // SD Card
+            p if SdCard::handles_port(p) => self.sd.read_port(p),
+
             _ => 0xFF,
         };
         val as i32
@@ -149,6 +157,13 @@ impl Bus for RetroShield {
     fn cpu_outp(&self, port: i32, val: i32) {
         let port = port as u8;
         let val = val as u8;
+
+        // SD Card ports
+        if SdCard::handles_port(port) {
+            self.sd.write_port(port, val);
+            return;
+        }
+
         // Note: We need interior mutability here since Bus trait takes &self
         // Using RefCell for dump state
         match port {
@@ -208,10 +223,11 @@ fn load_rom(cpu: &mut CPU, filename: &str) -> io::Result<usize> {
 }
 
 fn print_usage(program: &str) {
-    eprintln!("Usage: {} [-d] [-c cycles] [-o dump.bin] <rom.bin>", program);
+    eprintln!("Usage: {} [-d] [-c cycles] [-o dump.bin] [-s storage_dir] <rom.bin>", program);
     eprintln!("  -d          Debug mode");
     eprintln!("  -c cycles   Max cycles to run (0 = unlimited)");
     eprintln!("  -o file     Output file for memory dumps (default: dump.bin)");
+    eprintln!("  -s dir      Storage directory for SD card emulation (default: ./storage)");
 }
 
 fn main() {
@@ -221,6 +237,7 @@ fn main() {
     let mut max_cycles: u64 = 0;
     let mut rom_file: Option<String> = None;
     let mut dump_output: Option<String> = None;
+    let mut storage_dir: Option<String> = None;
 
     // Parse arguments
     let mut i = 1;
@@ -237,6 +254,12 @@ fn main() {
                 i += 1;
                 if i < args.len() {
                     dump_output = Some(args[i].clone());
+                }
+            }
+            "-s" | "--storage" => {
+                i += 1;
+                if i < args.len() {
+                    storage_dir = Some(args[i].clone());
                 }
             }
             arg if !arg.starts_with('-') => {
@@ -256,7 +279,8 @@ fn main() {
     };
 
     // Initialize system
-    let mut system = RetroShield::new();
+    let storage_path = PathBuf::from(storage_dir.unwrap_or_else(|| "storage".to_string()));
+    let mut system = RetroShield::new(storage_path);
     system.debug = debug;
     system.configure_rom(&rom_file);
 

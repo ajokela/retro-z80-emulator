@@ -1,6 +1,6 @@
 [package]
 name = "retro-z80-emulator"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 description = "Z80 emulator for RetroShield firmware with TUI debugger"
 license = "MIT"

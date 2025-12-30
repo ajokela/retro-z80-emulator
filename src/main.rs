@@ -295,6 +295,12 @@ fn main() {
     // Set CPU memory reference for dumps
     system.set_cpu_mem(&cpu.mem);
 
+    // Set CPU memory reference for SD DMA block transfers
+    system.sd.set_cpu_mem(&mut cpu.mem);
+
+    // Enable SD debug if main debug is enabled
+    system.sd.set_debug(debug);
+
     // Load ROM
     match load_rom(&mut cpu, &rom_file) {
         Ok(bytes) => {

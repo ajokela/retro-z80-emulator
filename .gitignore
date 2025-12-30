@@ -1,25 +1,17 @@
-# Claude Code
-CLAUDE.md
+# Build artifacts
+target/
+*.bin
+*.SYS
 
-# Rust build artifacts
-/target/
-debug/
-*.pdb
+# Storage directory (disk images)
+storage/
 
-# Cargo lock (optional for binaries, but we'll include it)
-# Cargo.lock
+# Test files
+test_*.asm
+test_*.bin
 
-# IDE
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
+# ROM files
+roms/*.bin
 
 # OS files
 .DS_Store
-Thumbs.db
-
-# Backup files
-*.bak
-*.orig

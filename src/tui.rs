@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use std::env;
 use std::fs::File;
 use std::io::{self, Read};
+use std::path::PathBuf;
 use std::process;
 use std::time::{Duration, Instant};
 
@@ -26,7 +27,10 @@ use ratatui::{
 use rz80::{Bus, CPU};
 use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
 
+mod sd;
 mod serial;
+
+use sd::SdCard;
 use serial::{Intel8251, Mc6850};
 
 //=============================================================================
@@ -340,6 +344,7 @@ struct RetroShield {
     rom_size: u16,
     acia: Mc6850,
     usart: Intel8251,
+    sd: SdCard,
     terminal: RefCell<TerminalBuffer>,
     input_buffer: RefCell<VecDeque<u8>>,
     output_buffer: RefCell<VecDeque<u8>>,  // Buffered output for throttled display
@@ -348,11 +353,12 @@ struct RetroShield {
 }
 
 impl RetroShield {
-    fn new() -> Self {
+    fn new(storage_dir: PathBuf) -> Self {
         Self {
             rom_size: 0x2000,
             acia: Mc6850::new(),
             usart: Intel8251::new(),
+            sd: SdCard::new(storage_dir),
             terminal: RefCell::new(TerminalBuffer::new()),
             input_buffer: RefCell::new(VecDeque::new()),
             output_buffer: RefCell::new(VecDeque::new()),
@@ -463,6 +469,8 @@ impl Bus for RetroShield {
                 *self.uses_8251.borrow_mut() = true; // Mark ROM as using 8251
                 self.get_input().unwrap_or(0)
             }
+            // SD Card ports
+            p if SdCard::handles_port(p) => self.sd.read_port(p),
             _ => 0xFF,
         };
         val as i32
@@ -471,6 +479,13 @@ impl Bus for RetroShield {
     fn cpu_outp(&self, port: i32, val: i32) {
         let port = port as u8;
         let val = val as u8;
+
+        // SD Card ports
+        if SdCard::handles_port(port) {
+            self.sd.write_port(port, val);
+            return;
+        }
+
         match port {
             ACIA_DATA => {
                 self.queue_output(val);
@@ -677,8 +692,8 @@ struct App {
 }
 
 impl App {
-    fn new(rom_file: &str, vt220_mode: bool) -> io::Result<Self> {
-        let mut system = RetroShield::new();
+    fn new(rom_file: &str, vt220_mode: bool, storage_dir: PathBuf) -> io::Result<Self> {
+        let mut system = RetroShield::new(storage_dir);
         system.configure_rom(rom_file);
         system.set_vt220_mode(vt220_mode);
 
@@ -722,6 +737,11 @@ impl App {
             last_blink: Instant::now(),
             vt220_mode,
         })
+    }
+
+    /// Initialize SD card DMA - must be called after App is constructed
+    fn init_sd_dma(&mut self) {
+        self.system.sd.set_cpu_mem(&mut self.cpu.mem);
     }
 
     fn update_cursor_blink(&mut self) {
@@ -1198,11 +1218,21 @@ fn ui(f: &mut Frame, app: &App) {
 // Main
 //=============================================================================
 
-fn print_usage(program: &str) {
+fn print_usage(program: &str, show_full: bool) {
+    if show_full {
+        eprintln!("RetroShield Z80 TUI Debugger v{}", env!("CARGO_PKG_VERSION"));
+        eprintln!();
+    }
     eprintln!("Usage: {} [OPTIONS] <rom.bin>", program);
+    if !show_full {
+        eprintln!("Try '{} --help' for more information.", program);
+        return;
+    }
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --vt220, -v   Enable VT220 escape sequence interpretation");
+    eprintln!("  -h, --help      Show this help message");
+    eprintln!("  -v, --vt220     Enable VT220 escape sequence interpretation");
+    eprintln!("  -s, --storage   SD card storage directory (default: storage)");
     eprintln!();
     eprintln!("TUI Debugger Controls:");
     eprintln!("  F5        Run continuously");
@@ -1220,37 +1250,55 @@ fn main() -> io::Result<()> {
     let args: Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        print_usage(&args[0]);
+        print_usage(&args[0], false);
         process::exit(1);
     }
 
     // Parse arguments
     let mut vt220_mode = false;
-    let mut rom_file: Option<&str> = None;
+    let mut rom_file: Option<String> = None;
+    let mut storage_dir: Option<String> = None;
 
-    for arg in &args[1..] {
-        match arg.as_str() {
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-h" | "--help" => {
+                print_usage(&args[0], true);
+                process::exit(0);
+            }
             "--vt220" | "-v" => vt220_mode = true,
-            _ if !arg.starts_with('-') => rom_file = Some(arg),
+            "-s" | "--storage" => {
+                i += 1;
+                if i < args.len() {
+                    storage_dir = Some(args[i].clone());
+                }
+            }
+            arg if !arg.starts_with('-') => rom_file = Some(arg.to_string()),
             _ => {
-                eprintln!("Unknown option: {}", arg);
-                print_usage(&args[0]);
+                eprintln!("Unknown option: {}", args[i]);
+                print_usage(&args[0], false);
                 process::exit(1);
             }
         }
+        i += 1;
     }
 
     let rom_file = match rom_file {
         Some(f) => f,
         None => {
             eprintln!("Error: ROM file required");
-            print_usage(&args[0]);
+            print_usage(&args[0], false);
             process::exit(1);
         }
     };
 
+    let storage_path = PathBuf::from(storage_dir.unwrap_or_else(|| "storage".to_string()));
+
     // Initialize app
-    let mut app = App::new(rom_file, vt220_mode)?;
+    let mut app = App::new(&rom_file, vt220_mode, storage_path)?;
+
+    // Initialize SD card DMA (must be after App is fully constructed)
+    app.init_sd_dma();
 
     // Setup terminal
     enable_raw_mode()?;

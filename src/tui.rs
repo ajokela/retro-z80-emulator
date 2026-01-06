@@ -53,6 +53,14 @@ const TERM_ROWS: usize = 24;
 // Terminal Emulation
 //=============================================================================
 
+/// Terminal emulation mode
+#[derive(Clone, Copy, PartialEq)]
+enum TerminalMode {
+    Plain,       // No escape sequence processing
+    Vt220,       // VT220 (8-bit, no UTF-8)
+    Xterm,       // xterm-compatible (UTF-8 support)
+}
+
 /// VT220 escape sequence parser state
 #[derive(Clone, Copy, PartialEq)]
 enum EscapeState {
@@ -67,10 +75,14 @@ struct TerminalBuffer {
     cursor_x: usize,
     cursor_y: usize,
     cursor_visible: bool,
-    vt220_mode: bool,
+    terminal_mode: TerminalMode,
     escape_state: EscapeState,
     escape_params: Vec<u16>,
     current_param: Option<u16>,
+    // UTF-8 decoding state
+    utf8_buf: [u8; 4],
+    utf8_len: usize,
+    utf8_expected: usize,
 }
 
 impl TerminalBuffer {
@@ -80,15 +92,22 @@ impl TerminalBuffer {
             cursor_x: 0,
             cursor_y: 0,
             cursor_visible: true,
-            vt220_mode: false,
+            terminal_mode: TerminalMode::Plain,
             escape_state: EscapeState::Normal,
             escape_params: Vec::new(),
             current_param: None,
+            utf8_buf: [0; 4],
+            utf8_len: 0,
+            utf8_expected: 0,
         }
     }
 
+    fn set_terminal_mode(&mut self, mode: TerminalMode) {
+        self.terminal_mode = mode;
+    }
+
     fn set_vt220_mode(&mut self, enabled: bool) {
-        self.vt220_mode = enabled;
+        self.terminal_mode = if enabled { TerminalMode::Vt220 } else { TerminalMode::Plain };
     }
 
     fn is_cursor_visible(&self) -> bool {
@@ -202,9 +221,65 @@ impl TerminalBuffer {
         }
     }
 
+    /// Process a byte - handles UTF-8 decoding in xterm mode
+    fn putbyte(&mut self, byte: u8) {
+        if self.terminal_mode == TerminalMode::Xterm {
+            // UTF-8 decoding
+            if self.utf8_expected > 0 {
+                // Continuation byte expected
+                if byte & 0xC0 == 0x80 {
+                    self.utf8_buf[self.utf8_len] = byte;
+                    self.utf8_len += 1;
+                    self.utf8_expected -= 1;
+
+                    if self.utf8_expected == 0 {
+                        // Complete sequence - decode
+                        if let Ok(s) = std::str::from_utf8(&self.utf8_buf[..self.utf8_len]) {
+                            if let Some(c) = s.chars().next() {
+                                self.putchar(c);
+                            }
+                        }
+                        self.utf8_len = 0;
+                    }
+                } else {
+                    // Invalid continuation - reset and process as new byte
+                    self.utf8_len = 0;
+                    self.utf8_expected = 0;
+                    self.putbyte(byte);
+                }
+            } else if byte & 0x80 == 0 {
+                // ASCII byte
+                self.putchar(byte as char);
+            } else if byte & 0xE0 == 0xC0 {
+                // 2-byte sequence start
+                self.utf8_buf[0] = byte;
+                self.utf8_len = 1;
+                self.utf8_expected = 1;
+            } else if byte & 0xF0 == 0xE0 {
+                // 3-byte sequence start (includes block characters)
+                self.utf8_buf[0] = byte;
+                self.utf8_len = 1;
+                self.utf8_expected = 2;
+            } else if byte & 0xF8 == 0xF0 {
+                // 4-byte sequence start
+                self.utf8_buf[0] = byte;
+                self.utf8_len = 1;
+                self.utf8_expected = 3;
+            } else {
+                // Invalid UTF-8 start byte - treat as Latin-1
+                self.putchar(byte as char);
+            }
+        } else {
+            // VT220 or Plain mode - single byte characters
+            self.putchar(byte as char);
+        }
+    }
+
     fn putchar(&mut self, c: char) {
-        // VT220 escape sequence handling
-        if self.vt220_mode {
+        // Escape sequence handling (VT220 and xterm both support ANSI sequences)
+        let process_escapes = self.terminal_mode == TerminalMode::Vt220
+                           || self.terminal_mode == TerminalMode::Xterm;
+        if process_escapes {
             match self.escape_state {
                 EscapeState::Escape => {
                     // Got ESC, waiting for next char
@@ -290,12 +365,12 @@ impl TerminalBuffer {
             }
             '\x1B' => {
                 // Escape
-                if self.vt220_mode {
+                if process_escapes {
                     self.escape_state = EscapeState::Escape;
                     self.escape_params.clear();
                     self.current_param = None;
                 }
-                // If not VT220 mode, just ignore
+                // If plain mode, just ignore
             }
             _ if c >= ' ' => {
                 if self.cursor_x < TERM_COLS && self.cursor_y < TERM_ROWS {
@@ -379,7 +454,7 @@ impl RetroShield {
         let count = max_chars.min(output.len());
         for _ in 0..count {
             if let Some(c) = output.pop_front() {
-                terminal.putchar(c as char);
+                terminal.putbyte(c);
             }
         }
         count
@@ -438,6 +513,10 @@ impl RetroShield {
 
     fn set_vt220_mode(&self, enabled: bool) {
         self.terminal.borrow_mut().set_vt220_mode(enabled);
+    }
+
+    fn set_terminal_mode(&self, mode: TerminalMode) {
+        self.terminal.borrow_mut().set_terminal_mode(mode);
     }
 
     fn is_cursor_visible(&self) -> bool {
@@ -687,15 +766,15 @@ struct App {
     // Cursor blink
     cursor_visible: bool,
     last_blink: Instant,
-    // VT220 mode
-    vt220_mode: bool,
+    // Terminal mode
+    terminal_mode: TerminalMode,
 }
 
 impl App {
-    fn new(rom_file: &str, vt220_mode: bool, storage_dir: PathBuf) -> io::Result<Self> {
+    fn new(rom_file: &str, terminal_mode: TerminalMode, storage_dir: PathBuf) -> io::Result<Self> {
         let mut system = RetroShield::new(storage_dir);
         system.configure_rom(rom_file);
-        system.set_vt220_mode(vt220_mode);
+        system.set_terminal_mode(terminal_mode);
 
         let mut cpu = CPU::new_64k();
 
@@ -735,7 +814,7 @@ impl App {
             host_memory_mb: 0.0,
             cursor_visible: true,
             last_blink: Instant::now(),
-            vt220_mode,
+            terminal_mode,
         })
     }
 
@@ -1205,7 +1284,7 @@ fn ui(f: &mut Frame, app: &App) {
     render_cpu_state(f, stack_state_chunks[1], &app.cpu);
     // In VT220 mode, use terminal's cursor visibility (controlled by escape sequences)
     // Otherwise use app's blinking cursor
-    let cursor_visible = if app.vt220_mode {
+    let cursor_visible = if app.terminal_mode != TerminalMode::Plain {
         app.system.is_cursor_visible() && app.cursor_visible
     } else {
         app.cursor_visible
@@ -1231,7 +1310,8 @@ fn print_usage(program: &str, show_full: bool) {
     eprintln!();
     eprintln!("Options:");
     eprintln!("  -h, --help      Show this help message");
-    eprintln!("  -v, --vt220     Enable VT220 escape sequence interpretation");
+    eprintln!("  -v, --vt220     Enable VT220 terminal emulation (8-bit, no UTF-8)");
+    eprintln!("  -x, --xterm     Enable xterm terminal emulation (UTF-8 support)");
     eprintln!("  -s, --storage   SD card storage directory (default: storage)");
     eprintln!();
     eprintln!("TUI Debugger Controls:");
@@ -1255,7 +1335,7 @@ fn main() -> io::Result<()> {
     }
 
     // Parse arguments
-    let mut vt220_mode = false;
+    let mut terminal_mode = TerminalMode::Plain;
     let mut rom_file: Option<String> = None;
     let mut storage_dir: Option<String> = None;
 
@@ -1266,7 +1346,8 @@ fn main() -> io::Result<()> {
                 print_usage(&args[0], true);
                 process::exit(0);
             }
-            "--vt220" | "-v" => vt220_mode = true,
+            "--vt220" | "-v" => terminal_mode = TerminalMode::Vt220,
+            "--xterm" | "-x" => terminal_mode = TerminalMode::Xterm,
             "-s" | "--storage" => {
                 i += 1;
                 if i < args.len() {
@@ -1295,7 +1376,7 @@ fn main() -> io::Result<()> {
     let storage_path = PathBuf::from(storage_dir.unwrap_or_else(|| "storage".to_string()));
 
     // Initialize app
-    let mut app = App::new(&rom_file, vt220_mode, storage_path)?;
+    let mut app = App::new(&rom_file, terminal_mode, storage_path)?;
 
     // Initialize SD card DMA (must be after App is fully constructed)
     app.init_sd_dma();

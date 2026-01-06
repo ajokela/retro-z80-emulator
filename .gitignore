@@ -15,3 +15,5 @@ roms/*.bin
 
 # OS files
 .DS_Store
+
+CLAUDE.md

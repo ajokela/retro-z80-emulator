@@ -10,6 +10,7 @@ homepage = "https://github.com/ajokela/retro-z80-emulator"
 readme = "README.md"
 keywords = ["z80", "emulator", "retroshield", "tui", "debugger"]
 categories = ["emulators", "command-line-utilities"]
+exclude = ["hello_rust*.asm", "CLAUDE.md"]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
